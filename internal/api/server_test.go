@@ -6,12 +6,11 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
-	"relai/internal/client"
 	"relai/internal/config"
 	"relai/internal/schema"
 
-	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -70,7 +69,10 @@ func TestLTPEndpoint(t *testing.T) {
 			}
 
 			// Create a test server with the mock client
-			server := createTestServer(t, mockClient)
+			cfg, err := config.LoadConfig("")
+			require.NoError(t, err)
+			server := NewServer(cfg)
+			server.client = mockClient
 
 			// Create a test request
 			w := httptest.NewRecorder()
@@ -106,36 +108,150 @@ func TestLTPEndpoint(t *testing.T) {
 	}
 }
 
-// createTestServer creates a server instance for testing
-func createTestServer(t *testing.T, mockClient client.KrakenClientInterface) *Server {
-	t.Helper()
-
-	cfg := &config.Config{
-		Port:                  "8080",
-		KrakenAPIBaseEndpoint: "http://test.example.com",
-	}
-
-	engine := gin.New()
-	engine.Use(gin.Logger())
-	engine.Use(gin.Recovery())
-
-	// Use mock client
-	engine.GET("/api/v1/ltp", func(c *gin.Context) {
-		response, err := mockClient.GetLTP()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
+func TestServerRateLimiting(t *testing.T) {
+	tests := []struct {
+		name              string
+		requestsPerMinute int
+		burstSize         int
+		cacheSize         int
+		requestSequence   []struct {
+			ip       string
+			wait     time.Duration
+			expected int
 		}
-		c.JSON(http.StatusOK, response)
-	})
-
-	srv := &http.Server{
-		Addr:    ":" + cfg.Port,
-		Handler: engine,
+	}{
+		{
+			name:              "basic rate limiting",
+			requestsPerMinute: 60,
+			burstSize:         2,
+			cacheSize:         1000,
+			requestSequence: []struct {
+				ip       string
+				wait     time.Duration
+				expected int
+			}{
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusTooManyRequests},
+				{ip: "192.168.1.1", wait: time.Second, expected: http.StatusOK},
+			},
+		},
+		{
+			name:              "multiple IPs",
+			requestsPerMinute: 60,
+			burstSize:         2,
+			cacheSize:         1000,
+			requestSequence: []struct {
+				ip       string
+				wait     time.Duration
+				expected int
+			}{
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.2", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.2", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusTooManyRequests},
+				{ip: "192.168.1.2", wait: 0, expected: http.StatusTooManyRequests},
+			},
+		},
+		{
+			name:              "cache eviction",
+			requestsPerMinute: 60,
+			burstSize:         2,
+			cacheSize:         2, // Only store 2 IPs
+			requestSequence: []struct {
+				ip       string
+				wait     time.Duration
+				expected int
+			}{
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.2", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.3", wait: 0, expected: http.StatusOK}, // Should evict 192.168.1.1
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK}, // Should work as IP was evicted
+			},
+		},
+		{
+			name:              "rate reset after wait",
+			requestsPerMinute: 60,
+			burstSize:         1,
+			cacheSize:         1000,
+			requestSequence: []struct {
+				ip       string
+				wait     time.Duration
+				expected int
+			}{
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusOK},
+				{ip: "192.168.1.1", wait: 0, expected: http.StatusTooManyRequests},
+				{ip: "192.168.1.1", wait: time.Second, expected: http.StatusOK},
+			},
+		},
 	}
 
-	return &Server{
-		Engine: engine,
-		srv:    srv,
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Setup config
+			cfg := &config.Config{
+				Port:                  "8080",
+				KrakenAPIBaseEndpoint: "http://test.example.com",
+				RateLimit: config.RateLimit{
+					RequestsPerMinute: tt.requestsPerMinute,
+					BurstSize:         tt.burstSize,
+					IPTrackingTTL:     time.Hour,
+					CacheSize:         tt.cacheSize,
+				},
+			}
+
+			// Setup mock client
+			mockClient := &mockKrakenClient{
+				response: schema.LTPResponse{
+					LTP: []schema.LTPItem{
+						{Pair: "BTC/USD", Amount: "52000.12"},
+					},
+				},
+			}
+
+			server := NewServer(cfg)
+			server.client = mockClient
+
+			// Helper function to make requests
+			makeRequest := func(ip string) *httptest.ResponseRecorder {
+				w := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/ltp", nil)
+				req.Header.Set("X-Real-IP", ip)
+				server.Engine.ServeHTTP(w, req)
+				return w
+			}
+
+			// Execute request sequence
+			for i, req := range tt.requestSequence {
+				if req.wait > 0 {
+					time.Sleep(req.wait)
+				}
+
+				w := makeRequest(req.ip)
+				assert.Equal(t, req.expected, w.Code,
+					"Request %d failed: expected status %d, got %d",
+					i, req.expected, w.Code)
+
+				// Verify headers for successful requests
+				if w.Code == http.StatusOK {
+					remaining := w.Header().Get("X-RateLimit-Remaining")
+					assert.NotEmpty(t, remaining,
+						"Missing rate limit header for request %d", i)
+				}
+
+				// Verify error response for rate limited requests
+				if w.Code == http.StatusTooManyRequests {
+					var response struct {
+						Error      string        `json:"error"`
+						RetryAfter time.Duration `json:"retry_after"`
+					}
+					err := json.NewDecoder(w.Body).Decode(&response)
+					assert.NoError(t, err)
+					assert.NotEmpty(t, response.Error)
+					assert.Greater(t, response.RetryAfter, time.Duration(0))
+				}
+			}
+		})
 	}
 }

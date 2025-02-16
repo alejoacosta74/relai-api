@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/alejoacosta74/go-logger"
 	"github.com/spf13/viper"
@@ -14,11 +15,20 @@ const (
 	DefaultLogLevel              = "info"
 )
 
+// Rate limiter specific configuration
+type RateLimit struct {
+	RequestsPerMinute int           `mapstructure:"requests_per_minute"`
+	BurstSize         int           `mapstructure:"burst_size"`
+	IPTrackingTTL     time.Duration `mapstructure:"ip_tracking_ttl"`
+	CacheSize         int           `mapstructure:"cache_size"`
+}
+
 // Config holds application configuration values.
 type Config struct {
-	Port                  string `mapstructure:"port"`
-	KrakenAPIBaseEndpoint string `mapstructure:"kraken_api_base_endpoint"`
-	LogLevel              string `mapstructure:"log_level"`
+	Port                  string    `mapstructure:"port"`
+	KrakenAPIBaseEndpoint string    `mapstructure:"kraken_api_base_endpoint"`
+	LogLevel              string    `mapstructure:"log_level"`
+	RateLimit             RateLimit `mapstructure:"rate_limit"`
 }
 
 // LoadConfig loads configuration from a file and/or environment variables.
@@ -28,6 +38,13 @@ func LoadConfig(configPath string) (*Config, error) {
 	v.SetDefault("port", DefaultPort)
 	v.SetDefault("kraken_api_base_endpoint", DefaultKrakenAPIBaseEndpoint)
 	v.SetDefault("log_level", DefaultLogLevel)
+
+	// set defaults for rate limit
+	v.SetDefault("rate_limit.requests_per_minute", 60)
+	v.SetDefault("rate_limit.burst_size", 5)
+	v.SetDefault("rate_limit.ip_tracking_ttl", "1h")
+	v.SetDefault("rate_limit.cache_size", 10000)
+
 	v.AutomaticEnv()
 	// Set prefix for env vars
 	v.SetEnvPrefix("RELAI")
@@ -59,7 +76,7 @@ func LoadConfig(configPath string) (*Config, error) {
 		return nil, err
 	}
 
-	logger.Infof("Configuration loaded: %+v", config)
+	logger.Debugf("Configuration loaded: %+v", config)
 
 	return &config, nil
 }
