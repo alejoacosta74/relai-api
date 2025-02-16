@@ -1,0 +1,8 @@
+# Server configuration
+port: "8080"
+
+# Kraken API configuration
+kraken_api_base_endpoint: "https://api.kraken.com/0/public/Ticker"
+
+# Log level
+log_level: "debug"
