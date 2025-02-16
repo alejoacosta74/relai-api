@@ -15,6 +15,7 @@ import (
 type Server struct {
 	Engine *gin.Engine
 	srv    *http.Server
+	client client.KrakenClientInterface
 }
 
 // NewServer creates a new Server instance with middleware and routes setup.
@@ -27,25 +28,21 @@ func NewServer(cfg *config.Config) *Server {
 
 	krakenClient := client.NewKrakenClient(cfg.KrakenAPIBaseEndpoint)
 
-	engine.GET("/api/v1/ltp", func(c *gin.Context) {
-		response, err := krakenClient.GetLTP()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		c.JSON(http.StatusOK, response)
-	})
-
 	// Create the underlying HTTP server.
 	srv := &http.Server{
 		Addr:    ":" + cfg.Port,
 		Handler: engine,
 	}
 
-	return &Server{
+	server := &Server{
 		Engine: engine,
 		srv:    srv,
+		client: krakenClient,
 	}
+
+	server.registerRoutes()
+
+	return server
 }
 
 // Start runs the HTTP server.

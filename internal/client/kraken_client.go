@@ -10,6 +10,13 @@ import (
 	"github.com/alejoacosta74/go-logger"
 )
 
+// KrakenClientInterface defines the interface for the Kraken client
+type KrakenClientInterface interface {
+	GetLTP() (schema.LTPResponse, error)
+}
+
+var _ KrakenClientInterface = (*KrakenClient)(nil)
+
 type KrakenClient struct {
 	baseEndpoint string
 	httpClient   *http.Client
