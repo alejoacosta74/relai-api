@@ -21,7 +21,16 @@ type IPRateLimiter struct {
 	burst int                              // Burst size (maximum bucket size, e.g 5 tokens)
 }
 
-// NewIPRateLimiter creates a new rate limiter with LRU cache
+// NewIPRateLimiter creates a new rate limiter with LRU cache for IP-based rate limiting
+// Parameters:
+//   - r: The rate limit per second (e.g., 1 means 1 request/second, 0.5 means 1 request/2 seconds)
+//   - b: The burst size - maximum number of requests allowed to be made at once before being rate limited
+//   - size: The maximum number of IP addresses to track in the LRU cache. Once this limit is reached,
+//     the least recently used IP addresses will be evicted from memory
+//
+// Returns:
+//   - An IPRateLimiter instance and nil error on success
+//   - nil and error if the LRU cache creation fails
 func NewIPRateLimiter(r rate.Limit, b int, size int) (*IPRateLimiter, error) {
 	cache, err := lru.New[string, *limiterItem](size)
 	if err != nil {

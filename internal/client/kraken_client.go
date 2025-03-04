@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"relai/internal/schema"
+	"time"
 
 	"github.com/alejoacosta74/go-logger"
 )
@@ -20,6 +21,8 @@ var _ KrakenClientInterface = (*KrakenClient)(nil)
 type KrakenClient struct {
 	baseEndpoint string
 	httpClient   *http.Client
+	maxRetries   int
+	backoffBase  time.Duration
 }
 
 func NewKrakenClient(endpoint string) *KrakenClient {
@@ -27,6 +30,8 @@ func NewKrakenClient(endpoint string) *KrakenClient {
 	return &KrakenClient{
 		baseEndpoint: endpoint,
 		httpClient:   &http.Client{},
+		maxRetries:   3,               // default to 3 retries
+		backoffBase:  1 * time.Second, // start with 1 second backoff
 	}
 }
 
@@ -54,6 +59,27 @@ func (c *KrakenClient) GetLTP() (schema.LTPResponse, error) {
 }
 
 func (c *KrakenClient) fetchTickerPrice(pair string) (string, error) {
+	var lastError error
+	for attempt := 0; attempt < c.maxRetries; attempt++ {
+		if attempt > 0 {
+			backoffDuration := c.backoffBase * time.Duration(1<<(attempt-1))
+			time.Sleep(backoffDuration)
+			logger.Debugf("Retrying request for pair %s (attempt %d/%d)", pair, attempt, c.maxRetries)
+		}
+
+		price, err := c.dofetchTickerPrice(pair)
+		if err == nil {
+			return price, nil
+		}
+		lastError = err
+		logger.Errorf("Error fetching ticker price for pair %s (attempt %d/%d): %v", pair, attempt, c.maxRetries, err)
+	}
+
+	return "", fmt.Errorf("failed after %d attempts: %w", c.maxRetries, lastError)
+
+}
+
+func (c *KrakenClient) dofetchTickerPrice(pair string) (string, error) {
 	url := fmt.Sprintf("%s?pair=%s", c.baseEndpoint, pair)
 	resp, err := c.httpClient.Get(url)
 	if err != nil {

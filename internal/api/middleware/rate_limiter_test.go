@@ -32,7 +32,7 @@ func TestBasicRateLimiting(t *testing.T) {
 	// Third request should be rate limited
 	assert.Equal(t, http.StatusTooManyRequests, makeRequestFromIP(router, "192.168.1.1"))
 
-	// Wait for rate limit to reset
+	// Wait for rate limit to add new tokens
 	time.Sleep(1 * time.Second)
 
 	// Should succeed again
