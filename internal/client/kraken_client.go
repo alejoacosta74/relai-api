@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"relai/internal/schema"
 	"time"
@@ -23,6 +24,7 @@ type KrakenClient struct {
 	httpClient   *http.Client
 	maxRetries   int
 	backoffBase  time.Duration
+	cache        *CachedResponse
 }
 
 func NewKrakenClient(endpoint string) *KrakenClient {
@@ -32,10 +34,17 @@ func NewKrakenClient(endpoint string) *KrakenClient {
 		httpClient:   &http.Client{},
 		maxRetries:   3,               // default to 3 retries
 		backoffBase:  1 * time.Second, // start with 1 second backoff
+		cache:        NewCachedResponse(),
 	}
 }
 
 func (c *KrakenClient) GetLTP() (schema.LTPResponse, error) {
+
+	// if there is a cached response, return it inmediately
+	if data, err := c.cache.Get(); err == nil {
+		return data, nil
+	}
+
 	// Kraken uses different symbols than what we want to display
 	pairs := map[string]string{
 		"BTC/USD": "XXBTZUSD",
@@ -55,6 +64,9 @@ func (c *KrakenClient) GetLTP() (schema.LTPResponse, error) {
 		response.LTP = append(response.LTP, schema.LTPItem{Pair: displayPair, Amount: price})
 	}
 
+	// cache the response
+	c.cache.Set(response)
+
 	return response, nil
 }
 
@@ -63,7 +75,9 @@ func (c *KrakenClient) fetchTickerPrice(pair string) (string, error) {
 	for attempt := 0; attempt < c.maxRetries; attempt++ {
 		if attempt > 0 {
 			backoffDuration := c.backoffBase * time.Duration(1<<(attempt-1))
-			time.Sleep(backoffDuration)
+			// Jitter the backoff duration to avoid thundering herd
+			jitter := time.Duration(rand.Int63n(int64(backoffDuration) / 2)) // 50% jitter
+			time.Sleep(backoffDuration + jitter)
 			logger.Debugf("Retrying request for pair %s (attempt %d/%d)", pair, attempt, c.maxRetries)
 		}
 
@@ -71,7 +85,6 @@ func (c *KrakenClient) fetchTickerPrice(pair string) (string, error) {
 		if err == nil {
 			return price, nil
 		}
-		lastError = err
 		logger.Errorf("Error fetching ticker price for pair %s (attempt %d/%d): %v", pair, attempt, c.maxRetries, err)
 	}
 
